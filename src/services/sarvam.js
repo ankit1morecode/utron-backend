@@ -48,7 +48,25 @@ const TTS_MAX_INPUTS_PER_REQUEST = 3;
 const STT_FILE_FIELD = 'file'; // multipart part holding the audio bytes
 const STT_LANGUAGE_FIELD = 'language_code'; // e.g. 'hi-IN'
 const STT_MODEL_FIELD = 'model';
-const STT_DEFAULT_MODEL = 'saarika:v2';
+// saarika:v2 was DEPRECATED by Sarvam and returns, for every request,
+//   "Model 'saarika:v2' has been deprecated. Please use 'saaras:v3' instead."
+// This is the same failure that killed TTS under bulbul:v2, and it had the same
+// symptom: speech-to-text failed 100% of the time with a perfectly valid key,
+// so holding the mic button produced nothing and the app blamed the recording.
+//
+// Verified against the live API on 2026-09-14 by round-tripping our own TTS
+// output back through this endpoint. Of the IDs Sarvam currently accepts,
+// three transcribe Hindi correctly and in Devanagari (mean latency over two
+// clips): saaras:v4 0.77s, saaras:v3 0.84s, saarika:v2.5 1.11s. saarika:v1,
+// saarika:v2 and saarika:flash are all deprecated.
+//
+// saaras:v3 is the default because it is the model Sarvam's own deprecation
+// message names, which makes it the ID most likely to keep working. Despite the
+// "saaras" family historically meaning speech-to-TRANSLATE, it returns the
+// spoken language here rather than English — checked explicitly, because a
+// silently translating model would break the Hindi/Hinglish intent matcher
+// rather than merely slow it down.
+const STT_DEFAULT_MODEL = 'saaras:v3';
 const STT_DEFAULT_MIME = 'audio/wav';
 const STT_DEFAULT_FILENAME = 'audio.wav';
 // Response keys checked, in order, for the transcript and the detected language.
@@ -69,6 +87,33 @@ function apiKey() {
 function timeoutMs(fallback) {
   const raw = Number(process.env.SARVAM_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+/**
+ * Model IDs, overridable from the environment.
+ *
+ * Sarvam has now retired a model out from under this service twice — bulbul:v2
+ * for TTS, saarika:v2 for STT — and each time the whole feature failed while
+ * the API key was perfectly valid. Both times the fix was a one-word change
+ * that still cost a code edit, a commit and a redeploy.
+ *
+ * Reading these from the environment means the next retirement is a variable
+ * change in the Railway dashboard and a restart. The defaults above stay the
+ * source of truth for a fresh checkout.
+ */
+export function ttsModel() {
+  const raw = process.env.SARVAM_TTS_MODEL;
+  return raw && raw.trim() ? raw.trim() : TTS_DEFAULT_MODEL;
+}
+
+export function sttModel() {
+  const raw = process.env.SARVAM_STT_MODEL;
+  return raw && raw.trim() ? raw.trim() : STT_DEFAULT_MODEL;
+}
+
+export function ttsSpeaker() {
+  const raw = process.env.SARVAM_TTS_SPEAKER;
+  return raw && raw.trim() ? raw.trim() : TTS_DEFAULT_SPEAKER;
 }
 
 export function isSarvamConfigured() {
@@ -312,8 +357,8 @@ export async function textToSpeech(text, languageCode = 'hi-IN', opts = {}) {
   const body = {
     inputs: sent,
     target_language_code: languageCode,
-    model: opts.model || TTS_DEFAULT_MODEL,
-    speaker: opts.speaker || TTS_DEFAULT_SPEAKER,
+    model: opts.model || ttsModel(),
+    speaker: opts.speaker || ttsSpeaker(),
   };
   // Optional tuning knobs — only sent when the caller actually supplied them,
   // so we never push an unsupported field into a known-good request shape.
@@ -403,7 +448,7 @@ export async function speechToText(audioBase64, languageCode = 'hi-IN', opts = {
     fileName,
   );
   form.append(STT_LANGUAGE_FIELD, languageCode);
-  form.append(STT_MODEL_FIELD, opts.model || STT_DEFAULT_MODEL);
+  form.append(STT_MODEL_FIELD, opts.model || sttModel());
 
   const data = await sarvamRequest(SARVAM_STT_URL, {
     body: form,

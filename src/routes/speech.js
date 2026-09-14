@@ -15,7 +15,14 @@
 import { Router } from "express";
 
 import { asyncHandler, validateBody } from "../middleware/index.js";
-import { textToSpeech, speechToText, isSarvamConfigured } from "../services/sarvam.js";
+import {
+  textToSpeech,
+  speechToText,
+  isSarvamConfigured,
+  ttsModel,
+  sttModel,
+  ttsSpeaker,
+} from "../services/sarvam.js";
 
 const router = Router();
 
@@ -30,9 +37,11 @@ const MAX_AUDIO_B64_CHARS = 8 * 1024 * 1024; // ~8MB of base64
 // body, so a router-level parser with a larger limit would have no effect — the ceiling
 // for /stt uploads has to be raised in index.js. The check below is the second gate.
 
-// bulbul:v2 is deprecated upstream and rejects every request. See the note in
-// services/sarvam.js. Verified against the live API on 2026-09-13.
-const SARVAM_TTS_MODEL = "bulbul:v3";
+// The model IDs come from services/sarvam.js, which reads them from the
+// environment. They used to be duplicated here as literals, which meant this
+// route could report one model while the service actually called another —
+// and that is exactly the kind of drift that made two deprecations (bulbul:v2,
+// saarika:v2) hard to see. One source of truth instead.
 
 /* ------------------------------------------------------------------ *
  * Language + voice catalogue
@@ -60,7 +69,7 @@ const LANGUAGE_CODES = new Set(LANGUAGES.map((l) => l.code));
 
 // The default speaker is the only one this backend has actually been run with; the rest
 // are passed through to Sarvam untouched and are flagged unvalidated for that reason.
-const DEFAULT_SPEAKER = "priya";
+// Sourced from the service so an env override moves both together.
 
 // The speaker list for bulbul:v3, as reported by Sarvam itself when sent an
 // invalid speaker. `validated: true` means a real request with that speaker
@@ -190,7 +199,7 @@ router.post(
           audio: null,
           text,
           languageCode,
-          speaker: opts.speaker || DEFAULT_SPEAKER,
+          speaker: opts.speaker || ttsSpeaker(),
           degraded: "tts_empty:sarvam returned no audio",
           warning,
         });
@@ -200,8 +209,8 @@ router.post(
         ok: true,
         audio,
         languageCode,
-        speaker: opts.speaker || DEFAULT_SPEAKER,
-        model: SARVAM_TTS_MODEL,
+        speaker: opts.speaker || ttsSpeaker(),
+        model: ttsModel(),
         encoding: "base64",
         degraded: null,
         warning,
@@ -214,7 +223,7 @@ router.post(
         audio: null,
         text,
         languageCode,
-        speaker: opts.speaker || DEFAULT_SPEAKER,
+        speaker: opts.speaker || ttsSpeaker(),
         degraded: `tts_failed:${err.message}`,
         error: `Sarvam text-to-speech failed: ${err.message}`,
         hint: "Speak this text with the device's own TTS engine.",
@@ -278,6 +287,7 @@ router.post(
         ok: true,
         // "" is a real answer (silence). null, below, means we never got one.
         transcript,
+        model: sttModel(),
         languageCode: normalizeLanguage(result?.languageCode || languageCode),
         empty: transcript.trim().length === 0,
         degraded: null,
@@ -290,6 +300,7 @@ router.post(
       return res.json({
         ok: false,
         transcript: null,
+        model: sttModel(),
         languageCode,
         degraded: `stt_failed:${err.message}`,
         error: `Sarvam speech-to-text failed: ${err.message}`,
@@ -316,9 +327,10 @@ router.get(
     return res.json({
       configured,
       provider: "sarvam",
-      model: SARVAM_TTS_MODEL,
+      model: ttsModel(),
+      sttModel: sttModel(),
       defaultLanguage: "hi-IN",
-      defaultSpeaker: DEFAULT_SPEAKER,
+      defaultSpeaker: ttsSpeaker(),
       languages: LANGUAGES,
       speakers: SPEAKERS,
       statusLegend: {
