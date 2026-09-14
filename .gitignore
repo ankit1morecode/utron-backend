@@ -1,0 +1,25 @@
+# ULTRON AIR API — repository ignores
+#
+# THE .env LINES ARE THE IMPORTANT ONES.
+#
+# .env holds live Gemini and Sarvam API keys plus the shared access token.
+# Committing it publishes working credentials to anyone who can read this
+# repository, and git history keeps them even after a later deletion —
+# rotating every key would then be the only real remedy.
+#
+# Commit .env.example. Never commit .env. Set the real values as environment
+# variables in the Railway dashboard instead.
+
+.env
+.env.*
+!.env.example
+
+node_modules/
+
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

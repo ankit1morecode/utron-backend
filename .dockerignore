@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+# Never bake credentials into an image layer. They are injected as environment
+# variables by the host at runtime.
+.env
+.env.*
+!.env.example
+*.md
+.git
