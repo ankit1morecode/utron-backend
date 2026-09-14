@@ -122,6 +122,9 @@ app.use('/api/assistant', aiLimiter);
 app.use('/api/chat', aiLimiter);
 app.use('/api/speech', aiLimiter);
 app.use('/api/translate', aiLimiter);
+// Vision sends a whole photograph to a multimodal model — by far the most
+// expensive call this server can make. It shares the AI limiter deliberately.
+app.use('/api/vision', aiLimiter);
 
 /* ------------------------------------------------------------------ *
  * /health - the single endpoint the mobile app polls to decide what to show as degraded.
@@ -167,6 +170,7 @@ const ROUTES = [
   // Legacy: the shipped mobile screens still call /api/chat. It is now a shim over runTurn().
   { prefix: '/api/chat', file: './routes/chat.js', label: 'chat (legacy)' },
   { prefix: '/api/translate', file: './routes/translate.js', label: 'translate' },
+  { prefix: '/api/vision', file: './routes/vision.js', label: 'vision' },
   { prefix: '/api/memory', file: './routes/memory.js', label: 'memory' },
   { prefix: '/api/device', file: './routes/device.js', label: 'device' },
   { prefix: '/api/safety', file: './routes/safety.js', label: 'safety' },

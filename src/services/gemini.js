@@ -10,7 +10,12 @@
 // bounded retry and the error formatting, so a flaky upstream can never hang a
 // request forever and the orchestrator can always tell *which* service died.
 
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+// gemini-2.0-flash was RETIRED by Google and 404s. The 404 body named
+// gemini-3.6-flash as the replacement; verified with a real call on 2026-09-13.
+// The deployed server overrides this with GEMINI_MODEL, so the outage was
+// invisible there — but a fresh checkout would have inherited a dead default,
+// which is how the two Sarvam deprecations also stayed hidden for so long.
+const DEFAULT_MODEL = 'gemini-3.6-flash';
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const DEFAULT_TIMEOUT_MS = 20000;
@@ -180,8 +185,56 @@ class GeminiError extends Error {
  * @param {object} [options] { label } — label names the caller in error messages
  * @returns {Promise<object>} parsed Gemini response JSON
  */
-async function callGemini(payload, { label = 'askGemini' } = {}) {
+/**
+ * Tokens the model spends REASONING before it emits a visible word.
+ *
+ * Gemini 3.x thinks before answering, and those thoughts are charged against
+ * `maxOutputTokens` — so a budget sized for the answer alone buys almost no
+ * answer at all. Measured on gemini-3.6-flash on 2026-09-14:
+ *
+ *   cap  thoughts  visible  finishReason   text
+ *   220     208        8    MAX_TOKENS     "The capital of France is Paris. I"
+ *   220     210        6    MAX_TOKENS     "Sunlight scatters off the"
+ *   600     212        7    STOP           "The capital of France is Paris."
+ *   600     413       32    STOP           (complete)
+ *
+ * Every spoken reply the app has ever produced was being cut off mid-sentence
+ * at the old 220 cap, and nothing reported it: the response was non-empty, so
+ * it looked like a valid answer.
+ *
+ * `thinkingConfig: { thinkingBudget: 0 }` is NOT a way out — this model rejects
+ * it with HTTP 400. Headroom is the only lever.
+ *
+ * 640 covers the worst observed spend (559) with margin. It is a ceiling, not a
+ * spend: `usageMetadata` above shows thinking stopping well short of it, and
+ * unused budget costs nothing.
+ */
+const THINKING_HEADROOM_TOKENS = 640;
+
+/**
+ * Add thinking headroom so `maxOutputTokens` means what callers assume: the
+ * length of the ANSWER, not the answer plus the model's private reasoning.
+ *
+ * Done here rather than at each call site so a new call site cannot forget it
+ * and quietly ship truncated replies — which is exactly how this went unnoticed.
+ */
+function withThinkingHeadroom(payload) {
+  const config = payload && payload.generationConfig;
+  if (!config || typeof config.maxOutputTokens !== 'number') return payload;
+
+  return {
+    ...payload,
+    generationConfig: {
+      ...config,
+      maxOutputTokens: config.maxOutputTokens + THINKING_HEADROOM_TOKENS,
+    },
+  };
+}
+
+async function callGemini(rawPayload, { label = 'askGemini' } = {}) {
   requireKey(label);
+
+  const payload = withThinkingHeadroom(rawPayload);
 
   const url =
     `${API_BASE}/${encodeURIComponent(modelName())}:generateContent` +
@@ -266,6 +319,25 @@ function extractText(data) {
   if (!text && candidate && candidate.finishReason && candidate.finishReason !== 'STOP') {
     throw new GeminiError(`Gemini returned no text (finishReason: ${candidate.finishReason})`);
   }
+
+  /*
+   * A truncated answer is not an answer, and this is the check that was
+   * missing. The old code only objected when the text was EMPTY, so a reply cut
+   * off mid-word — "The capital of France is Paris. I" — sailed through as a
+   * success and was spoken to the user as if complete.
+   *
+   * It is logged rather than thrown: half an answer is still worth more to the
+   * user than an error, and the headroom above should make this rare. If it
+   * appears in the logs at all, a budget somewhere is too small — that is the
+   * signal this line exists to give.
+   */
+  if (text && candidate && candidate.finishReason === 'MAX_TOKENS') {
+    console.warn(
+      '[gemini] TRUNCATED: the reply hit maxOutputTokens and was cut off mid-answer. ' +
+        `Raise the budget at the call site. Text ended: "...${text.slice(-60)}"`,
+    );
+  }
+
   return text;
 }
 
@@ -339,6 +411,95 @@ export async function askGemini(userId, message, opts = {}) {
   }
 
   return reply;
+}
+
+/* ------------------------------------------------------------------ *
+ * Vision
+ * ------------------------------------------------------------------ *
+ * Gemini's generateContent is multimodal: an image rides in the same `parts`
+ * array as the text, as an `inline_data` blob. That is the whole reason the
+ * accessibility vision features need no on-device model and no native code —
+ * the camera is already in the app, and this endpoint already exists.
+ *
+ * WHAT THIS IS NOT
+ * ----------------
+ * It is a round trip to a server. It answers questions about ONE still frame,
+ * in about a second, when there is a network. It is emphatically not real-time
+ * obstacle detection, and nothing built on it may be described as watching the
+ * road or warning the user about anything in motion. That needs a continuous
+ * on-device model, which is a different feature with a different risk profile.
+ */
+
+/** Max inline image. Gemini's own inline limit is ~20MB of REQUEST, base64 included. */
+const VISION_MAX_BASE64_CHARS = 7 * 1024 * 1024;
+
+const VISION_ALLOWED_MIME = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+]);
+
+/**
+ * Ask a question about one image.
+ *
+ * @param {string} imageBase64 raw base64, no `data:` prefix
+ * @param {string} prompt what to ask about it
+ * @param {object} [opts]
+ * @param {string} [opts.mimeType='image/jpeg']
+ * @param {string} [opts.systemInstruction]
+ * @param {number} [opts.maxOutputTokens=260]
+ * @returns {Promise<string>}
+ */
+export async function describeImage(imageBase64, prompt, opts = {}) {
+  requireKey('Gemini vision');
+
+  const data = String(imageBase64 == null ? '' : imageBase64).trim();
+  if (!data) throw new Error('describeImage: imageBase64 is empty');
+  if (data.length > VISION_MAX_BASE64_CHARS) {
+    throw new Error(
+      `describeImage: image is ${data.length} base64 chars, over the ${VISION_MAX_BASE64_CHARS} limit. ` +
+        'Capture at a lower resolution or compress before sending.',
+    );
+  }
+
+  const mimeType = opts.mimeType || 'image/jpeg';
+  if (!VISION_ALLOWED_MIME.has(mimeType)) {
+    throw new Error(
+      `describeImage: unsupported mimeType "${mimeType}". ` +
+        `Supported: ${[...VISION_ALLOWED_MIME].join(', ')}.`,
+    );
+  }
+
+  const response = await callGemini(
+    {
+      systemInstruction: {
+        parts: [{ text: opts.systemInstruction || SYSTEM_INSTRUCTION }],
+      },
+      contents: [
+        {
+          role: 'user',
+          // Text first, image second: the instruction frames how the model
+          // reads the picture, and the order is what the API documents.
+          parts: [
+            { text: String(prompt) },
+            { inline_data: { mime_type: mimeType, data } },
+          ],
+        },
+      ],
+      generationConfig: {
+        // Lower than conversation: a description of what is physically in
+        // front of a user who may not be able to see it is not the place for
+        // invention.
+        temperature: 0.2,
+        maxOutputTokens: opts.maxOutputTokens == null ? 260 : opts.maxOutputTokens,
+      },
+    },
+    { label: 'describeImage' },
+  );
+
+  return extractText(response) || EMPTY_REPLY_FALLBACK;
 }
 
 /** Raw session contents for a user (a copy — mutating it does nothing). */
