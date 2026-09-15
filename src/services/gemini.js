@@ -21,7 +21,12 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_TIMEOUT_MS = 20000;
 const MAX_ATTEMPTS = 3; // 1 initial try + 2 retries
 const RETRY_BASE_DELAY_MS = 400; // exponential: 400ms, 800ms (+ jitter)
-const RETRY_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+// 429 is deliberately ABSENT. Google's free tier limit is per-DAY
+// (GenerateRequestsPerDayPerProjectPerModel-FreeTier, 20 requests), so
+// retrying the same model half a second later cannot help — it just burns
+// three requests instead of one. A 429 falls through to the next model in
+// the chain instead, which has its own separate quota bucket.
+const RETRY_STATUSES = new Set([408, 500, 502, 503, 504]);
 const ERROR_BODY_MAX = 400; // truncate upstream bodies inside error messages
 
 // Session cap. 20 *turns* = 40 messages (a user message + a model message per
@@ -231,13 +236,58 @@ function withThinkingHeadroom(payload) {
   };
 }
 
-async function callGemini(rawPayload, { label = 'askGemini' } = {}) {
-  requireKey(label);
+/**
+ * Models to try, in order.
+ *
+ * WHY A CHAIN AND NOT ONE MODEL
+ * -----------------------------
+ * Google's free tier allows 20 requests per day PER MODEL. Measured, not
+ * assumed — the 429 body names the quota:
+ *
+ *   quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier
+ *   value:   20
+ *
+ * Twenty requests is a few minutes of real use, after which every reply becomes
+ * the offline fallback and the app looks broken. But the limit is per model, so
+ * a second model is a second allowance. The chain turns "ULTRON stopped
+ * working" into "ULTRON got slightly different at some point today".
+ *
+ * It also covers the other failure this service has already suffered twice: a
+ * model being RETIRED (404). gemini-2.0-flash went that way. A chain degrades
+ * instead of going dark.
+ *
+ * The fallbacks are flash-lite variants on purpose: measured at 1.4s against
+ * 7-18s for gemini-3.6-flash, and they spend no thinking tokens at all. The
+ * fallback is faster than the primary — the cost is answer quality, not speed.
+ */
+const DEFAULT_FALLBACK_MODELS = ['gemini-3.5-flash-lite', 'gemini-2.5-flash-lite'];
 
-  const payload = withThinkingHeadroom(rawPayload);
+function modelChain() {
+  const raw = process.env.GEMINI_FALLBACK_MODELS;
+  const fallbacks =
+    raw && raw.trim()
+      ? raw.split(',').map((m) => m.trim()).filter(Boolean)
+      : DEFAULT_FALLBACK_MODELS;
 
+  const chain = [modelName(), ...fallbacks];
+  // Dedupe, preserving order: GEMINI_MODEL may already name a fallback.
+  return chain.filter((model, index) => chain.indexOf(model) === index);
+}
+
+/**
+ * The model that last answered successfully, so /health can report what the
+ * app is actually talking to rather than what it was configured to talk to.
+ */
+let activeModel = null;
+
+export function activeGeminiModel() {
+  return activeModel || modelName();
+}
+
+/** One model, with its own timeout and bounded retry. */
+async function callGeminiOnModel(payload, label, model) {
   const url =
-    `${API_BASE}/${encodeURIComponent(modelName())}:generateContent` +
+    `${API_BASE}/${encodeURIComponent(model)}:generateContent` +
     `?key=${encodeURIComponent(apiKey())}`;
 
   let lastError = null;
@@ -293,6 +343,59 @@ async function callGemini(rawPayload, { label = 'askGemini' } = {}) {
       await sleep(delay + Math.floor(Math.random() * 150));
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  throw lastError || new GeminiError(`Gemini ${label} failed for an unknown reason`);
+}
+
+/**
+ * One request to generateContent, walking the model chain.
+ *
+ * Falls through to the next model on 429 (that model's daily quota is gone) and
+ * on 404 (that model has been retired). Every other failure throws immediately:
+ * a bad request or a rejected key will fail identically on every model, and
+ * marching through the chain would only multiply the latency.
+ */
+async function callGemini(rawPayload, { label = 'askGemini' } = {}) {
+  requireKey(label);
+
+  const payload = withThinkingHeadroom(rawPayload);
+  const chain = modelChain();
+
+  let lastError = null;
+
+  for (let index = 0; index < chain.length; index += 1) {
+    const model = chain[index];
+
+    try {
+      const data = await callGeminiOnModel(payload, label, model);
+      if (index > 0) {
+        console.warn(
+          `[gemini] ${label} fell back to ${model} (${chain[0]} was unavailable). ` +
+            'Replies may be shorter or simpler until the primary model recovers.',
+        );
+      }
+      activeModel = model;
+      return data;
+    } catch (err) {
+      lastError = err;
+      const status = err instanceof GeminiError ? err.status : null;
+
+      const quotaGone = status === 429;
+      const modelGone = status === 404;
+      const hasAnother = index < chain.length - 1;
+
+      if ((quotaGone || modelGone) && hasAnother) {
+        console.warn(
+          `[gemini] ${model} unavailable (HTTP ${status}${
+            quotaGone ? ', daily quota exhausted' : ', model retired'
+          }). Trying ${chain[index + 1]}.`,
+        );
+        continue;
+      }
+
+      throw err;
     }
   }
 

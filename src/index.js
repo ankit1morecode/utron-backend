@@ -86,6 +86,11 @@ const isSarvamConfigured = (sarvamMod && sarvamMod.isSarvamConfigured) || (() =>
 const isGeminiUsable = (geminiMod && geminiMod.isGeminiUsable) || isGeminiConfigured;
 const isSarvamUsable = (sarvamMod && sarvamMod.isSarvamUsable) || isSarvamConfigured;
 const geminiCredentialError = (geminiMod && geminiMod.geminiCredentialError) || (() => null);
+// Which model actually answered last. Not the same as GEMINI_MODEL: the
+// service walks a fallback chain when a model's daily quota runs out, and
+// reporting the configured value would hide that it had happened.
+const activeGeminiModel =
+  (geminiMod && geminiMod.activeGeminiModel) || (() => process.env.GEMINI_MODEL || null);
 const sarvamCredentialError = (sarvamMod && sarvamMod.sarvamCredentialError) || (() => null);
 const connectDB = (dbMod && dbMod.connectDB) || (async () => {});
 
@@ -154,7 +159,15 @@ app.get('/health', (req, res) => {
     // Why an integration is down, when we know. Never contains key material,
     // so it is safe to show in the app and in a monitoring dashboard.
     issues: [geminiCredentialError(), sarvamCredentialError()].filter(Boolean),
+    // The model currently answering. When this differs from GEMINI_MODEL, the
+    // primary model's quota is exhausted or it has been retired, and replies
+    // are coming from a fallback — worth seeing before someone reports that
+    // "the AI got worse today".
+    geminiModel: activeGeminiModel(),
     capabilities: {
+      // Answers about ONE still photo via POST /api/vision. Not continuous
+      // sight: obstacle and traffic-light tasks are refused with 501.
+      vision: gemini,
       // Planned, NOT implemented. Never advertise this as working.
       environmentalSoundDetection: false,
     },

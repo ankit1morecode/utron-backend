@@ -363,6 +363,29 @@ export const INTENT_REGISTRY = {
   },
 
   // ------------------------------------------------------------- navigation
+  // ------------------------------------------------------------- app launch
+  open_app: {
+    name: 'open_app',
+    description:
+      'Open another app on the phone by name, e.g. "open WhatsApp", "WhatsApp kholo", ' +
+      '"insta kholo". Put the app name the user said in appName, exactly as they said it, ' +
+      'without translating it.',
+    params: { appName: 'string' },
+    // None. The client launches a URL scheme, and Android restricts QUERYING
+    // installed apps, not launching one the user named.
+    requiredPermissions: [],
+    // Launching an app is visible, instant and undone by pressing back. A
+    // confirmation sheet would make the voice shortcut slower than doing it by
+    // hand, which is the one thing it cannot afford to be.
+    requiresConfirmation: false,
+    executedBy: 'client',
+    phase: 2,
+    riskLevel: 'low',
+    notes:
+      'The client matches appName against a curated catalogue of ~23 apps. An unknown name ' +
+      'is refused by name rather than attempted, so do not invent app names here.',
+  },
+
   navigate: {
     name: 'navigate',
     description: 'Start navigation to a destination.',
@@ -375,35 +398,38 @@ export const INTENT_REGISTRY = {
   },
 
   // -------------------------------------------------------- vision (PHASE 4)
-  // PLANNED CAPABILITY — NOT IMPLEMENTED. There is no camera or vision pipeline
-  // in this backend. The orchestrator answers honestly that this is coming; it
-  // must never pretend to have looked at anything.
+  // IMPLEMENTED, via POST /api/vision — a multimodal round trip, not an
+  // on-device model. The client takes ONE photo and this backend answers about
+  // it. There is no continuous sight and no obstacle or traffic-light
+  // capability: /api/vision refuses those two tasks with 501 by design, because
+  // a one-second-old answer about a moving hazard is worse than no answer.
   describe_scene: {
     name: 'describe_scene',
     description:
-      'Describe what the camera is pointed at (planned capability, not yet available).',
+      'Describe what the camera is pointed at. Answers about a single photo taken now; ' +
+      'it cannot watch continuously or report on anything moving.',
     params: {},
     requiredPermissions: ['camera'],
     requiresConfirmation: false,
     executedBy: 'client',
     phase: 4,
     riskLevel: 'low',
-    implemented: false,
-    notes: 'Phase 4 accessibility feature. No vision model is wired up yet.',
+    notes:
+      'Client captures and calls POST /api/vision with task=describe_scene. Never imply ' +
+      'continuous vision or hazard warning.',
   },
 
   read_text: {
     name: 'read_text',
     description:
-      'Read printed text in front of the user out loud (planned capability, not yet available).',
+      'Read printed text the camera is pointed at out loud. Answers about a single photo.',
     params: {},
     requiredPermissions: ['camera'],
     requiresConfirmation: false,
     executedBy: 'client',
     phase: 4,
     riskLevel: 'low',
-    implemented: false,
-    notes: 'Phase 4 accessibility feature. No OCR is wired up yet.',
+    notes: 'Client captures and calls POST /api/vision with task=read_text.',
   },
 
   // ----------------------------------------------------------------- safety
