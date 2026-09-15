@@ -69,6 +69,99 @@ const STT_MODEL_FIELD = 'model';
 const STT_DEFAULT_MODEL = 'saaras:v3';
 const STT_DEFAULT_MIME = 'audio/wav';
 const STT_DEFAULT_FILENAME = 'audio.wav';
+
+/*
+ * MIME types Sarvam's speech-to-text endpoint accepts, read from its own 400
+ * response on 2026-09-15 rather than from documentation.
+ *
+ * NOTE WHAT IS ABSENT: 'audio/m4a'. That is precisely what the phone was
+ * sending. voice.ts records AAC in an MPEG-4 container and labelled it
+ * 'audio/m4a', which is a common spelling but not a registered type — the
+ * registered ones are 'audio/mp4' and 'audio/x-m4a'. Sarvam rejected every
+ * upload with HTTP 400 before looking at a single byte, so EVERY voice command
+ * from the phone failed while a WAV test from a laptop passed.
+ *
+ * This normalisation lives on the SERVER on purpose. Fixing only the app would
+ * mean every already-installed build stays broken until its owner reinstalls.
+ */
+const STT_ACCEPTED_MIME = new Set([
+  'audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg-3', 'audio/x-mp3',
+  'audio/wav', 'audio/x-wav', 'audio/wave',
+  'audio/pcm_s16le', 'audio/l16', 'audio/raw',
+  'application/octet-stream',
+  'audio/aac', 'audio/x-aac',
+  'audio/aiff', 'audio/x-aiff',
+  'audio/ogg', 'audio/opus',
+  'audio/flac', 'audio/x-flac',
+  'audio/mp4', 'audio/x-m4a',
+  'audio/amr', 'audio/x-ms-wma',
+  'audio/webm', 'video/webm',
+]);
+
+/** Spellings clients really send, mapped to the registered equivalent. */
+const STT_MIME_ALIASES = {
+  'audio/m4a': 'audio/mp4',
+  'audio/x-m4a ': 'audio/x-m4a',
+  'audio/mp4a-latm': 'audio/mp4',
+  'audio/aacp': 'audio/aac',
+  'audio/vnd.wave': 'audio/wav',
+  'audio/x-pn-wav': 'audio/wav',
+  'audio/3gpp': 'audio/mp4',
+  'audio/webm;codecs=opus': 'audio/webm',
+};
+
+/** Extension Sarvam should see, so filename and type never disagree. */
+const STT_MIME_EXTENSION = {
+  'audio/mp4': '.m4a',
+  'audio/x-m4a': '.m4a',
+  'audio/aac': '.aac',
+  'audio/x-aac': '.aac',
+  'audio/mpeg': '.mp3',
+  'audio/mp3': '.mp3',
+  'audio/ogg': '.ogg',
+  'audio/opus': '.opus',
+  'audio/flac': '.flac',
+  'audio/webm': '.webm',
+  'audio/amr': '.amr',
+  'audio/wav': '.wav',
+  'audio/x-wav': '.wav',
+};
+
+/**
+ * Coerce whatever the client declared into something Sarvam will accept.
+ *
+ * Unknown types become 'application/octet-stream', which is on the accepted
+ * list: handing the bytes over unlabelled and letting Sarvam decode them is
+ * strictly better than a guaranteed 400 for a type we failed to anticipate.
+ */
+function normalizeSttMime(raw) {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (!value) return STT_DEFAULT_MIME;
+
+  const aliased = STT_MIME_ALIASES[value] || value;
+  if (STT_ACCEPTED_MIME.has(aliased)) return aliased;
+
+  // Strip any parameters ("audio/webm; codecs=opus") and retry once.
+  const bare = aliased.split(';')[0].trim();
+  if (STT_ACCEPTED_MIME.has(bare)) return bare;
+
+  console.warn(
+    `[sarvam] Unrecognised STT mimeType "${raw}". Sending as application/octet-stream ` +
+      'so Sarvam sniffs the bytes rather than rejecting the upload outright.',
+  );
+  return 'application/octet-stream';
+}
+
+/** A filename whose extension agrees with the type we are declaring. */
+function fileNameForMime(requested, mimeType) {
+  const extension = STT_MIME_EXTENSION[mimeType];
+  if (!extension) return requested || STT_DEFAULT_FILENAME;
+
+  if (typeof requested === 'string' && requested.toLowerCase().endsWith(extension)) {
+    return requested;
+  }
+  return 'audio' + extension;
+}
 // Response keys checked, in order, for the transcript and the detected language.
 const STT_TRANSCRIPT_KEYS = ['transcript', 'text', 'transcription'];
 const STT_LANGUAGE_KEYS = ['language_code', 'languageCode', 'language'];
@@ -436,8 +529,10 @@ export async function speechToText(audioBase64, languageCode = 'hi-IN', opts = {
   }
 
   const buffer = decodeAudio(audioBase64);
-  const mimeType = opts.mimeType || STT_DEFAULT_MIME;
-  const fileName = opts.fileName || STT_DEFAULT_FILENAME;
+  // Never forward the client's spelling unchecked: 'audio/m4a' is the one the
+  // phone sends and the one Sarvam refuses. See normalizeSttMime.
+  const mimeType = normalizeSttMime(opts.mimeType);
+  const fileName = fileNameForMime(opts.fileName, mimeType);
 
   const form = new FormData();
   // Copy into a fresh Uint8Array: a Buffer is a view onto a pooled ArrayBuffer,
