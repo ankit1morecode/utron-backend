@@ -363,6 +363,24 @@ export const INTENT_REGISTRY = {
   },
 
   // ------------------------------------------------------------- navigation
+  // -------------------------------------------------------- voice navigation
+  open_screen: {
+    name: 'open_screen',
+    description:
+      "Open a screen INSIDE the ULTRON app, e.g. 'open settings', 'settings kholo', " +
+      "'open permissions', 'open the look screen'. Put the screen the user named in " +
+      'screenName. Use this for ULTRON\'s own screens; use open_app for other apps on the phone.',
+    params: { screenName: 'string' },
+    requiredPermissions: [],
+    requiresConfirmation: false,
+    executedBy: 'client',
+    phase: 4,
+    riskLevel: 'low',
+    notes:
+      'Accessibility feature (spec 11): move around the app without looking at it. The client ' +
+      'resolves screenName against its own screen catalogue and refuses names it does not know.',
+  },
+
   // ------------------------------------------------------------- app launch
   open_app: {
     name: 'open_app',
